@@ -18,6 +18,7 @@ export async function renderReconcile(el) {
         <div class="stat"><div class="n">${dash.pending_jobs}</div><div class="l">待执行补采</div></div>
         <div class="stat"><div class="n">${dash.batches}</div><div class="l">批次数</div></div>
       </div>
+      <div class="detail-box"><strong>窗止点摘要</strong>：${escapeHtml(dash.window_end_summary || '窗止点：暂无水位落点')}</div>
       <div class="row">
         <button id="run">生成对账报告</button>
         <button id="reload" class="ghost">刷新</button>
@@ -26,9 +27,10 @@ export async function renderReconcile(el) {
     </div>
     <div class="card">
       <h2>中心缺口矩阵</h2>
+      <p class="muted">中心卡片窗止点与水位徽标同口径：窗止点取最新水位落点的 window_end，挂窗止点摘要一并展示。</p>
       <table>
         <thead>
-          <tr><th>中心</th><th>状态</th><th>批次</th><th>访视行</th><th>缺口</th><th>开放发现</th></tr>
+          <tr><th>中心</th><th>状态</th><th>批次</th><th>访视行</th><th>缺口</th><th>开放发现</th><th>窗止点 / 水位落点</th></tr>
         </thead>
         <tbody>
           ${(matrix.items || []).map((s) => `
@@ -39,6 +41,10 @@ export async function renderReconcile(el) {
               <td>${s.row_count}</td>
               <td>${s.gap_count || 0}</td>
               <td>${s.open_findings || 0}</td>
+              <td>
+                <span class="chip ${s.watermark_status === '已落定' ? 'ok' : 'bad'}">水位徽标：${escapeHtml(s.watermark_status || '缺落点行')}</span>
+                <div class="muted">窗止点：${escapeHtml(String(s.window_end ?? '缺落点'))} · 落点 ${escapeHtml(s.ledger_code || '无')}</div>
+              </td>
             </tr>`).join('')}
         </tbody>
       </table>

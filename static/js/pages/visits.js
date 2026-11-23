@@ -39,7 +39,7 @@ export async function renderVisits(el) {
         <thead>
           <tr>
             <th>批次编码</th><th>中心</th><th>方案</th><th>状态</th>
-            <th>行数</th><th>缺口</th><th>备注</th><th>操作</th>
+            <th>行数</th><th>缺口</th><th>水位徽标 / 窗止点</th><th>备注</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="batchBody">
@@ -53,6 +53,9 @@ export async function renderVisits(el) {
     </div>`;
 
   function batchRow(b) {
+    const wm = b.watermark || {};
+    const end = wm.window_end == null ? '缺落点' : wm.window_end;
+    const wmClass = wm.consistency === '一致' ? 'ok' : 'bad';
     return `
       <tr>
         <td>${escapeHtml(b.batch_code)}</td>
@@ -61,6 +64,10 @@ export async function renderVisits(el) {
         <td>${chip(b.status)}</td>
         <td>${b.item_count}</td>
         <td>${b.gap_count}</td>
+        <td>
+          <span class="chip ${wmClass}" title="水位徽标">${escapeHtml(wm.badge || '水位徽标：缺落点行 · 窗止点缺失')}</span>
+          <div class="muted">窗止点：${escapeHtml(String(end))}${wm.ledger_code ? ' · 落点 ' + escapeHtml(wm.ledger_code) : ''}</div>
+        </td>
         <td class="muted">${escapeHtml(b.note || '')}</td>
         <td class="row">
           <button data-view="${b.id}" class="ghost">查看</button>
@@ -78,11 +85,19 @@ export async function renderVisits(el) {
   async function loadDetail(id) {
     const b = await api(`/api/batches/${id}`);
     const qs = b.quality_stats || {};
+    const wm = b.watermark || {};
+    const wmClass = wm.consistency === '一致' ? 'ok' : 'bad';
     detail.innerHTML = `
       <div class="row">
         <strong>${escapeHtml(b.batch_code)}</strong>
         ${chip(b.status)}
         <span class="muted">${escapeHtml(b.site_name)} · 方案 ${escapeHtml(b.protocol_title || '-')}</span>
+      </div>
+      <div class="row">
+        <span class="chip ${wmClass}">水位徽标：${escapeHtml(wm.status || '缺落点行')}</span>
+        <span class="muted">窗止点：${escapeHtml(String(wm.window_end ?? '缺落点'))} · 水位落点：${escapeHtml(wm.ledger_code || '无')}</span>
+        <input id="pinEnd" type="number" placeholder="窗止点" style="width:120px" />
+        <button id="pinWatermark" class="ghost">钉水位落点</button>
       </div>
       <div class="grid">
         <div class="stat"><div class="n">${b.item_count}</div><div class="l">访视行</div></div>
@@ -136,6 +151,21 @@ export async function renderVisits(el) {
             quality: q || null,
           }),
         });
+        await loadDetail(id);
+        await softReload();
+      } catch (e) { showErr(e.message); }
+    };
+    detail.querySelector('#pinWatermark').onclick = async () => {
+      try {
+        const end = Number(detail.querySelector('#pinEnd').value);
+        const r = await api(`/api/watermarks/${b.site_id}/pin`, {
+          method: 'POST',
+          body: JSON.stringify({ window_end: end }),
+        });
+        detail.insertAdjacentHTML(
+          'afterbegin',
+          `<p class="muted">水位已落定：${escapeHtml(r.badge || '')} · 落点 ${escapeHtml(r.landing?.ledger_code || '')}</p>`
+        );
         await loadDetail(id);
         await softReload();
       } catch (e) { showErr(e.message); }

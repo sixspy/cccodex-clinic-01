@@ -7,6 +7,7 @@ from datetime import datetime
 from app.db import get_db
 from app.services import audit as audit_svc
 from app.services import protocols as protocols_svc
+from app.services import watermarks as watermark_svc
 from app.services.errors import ServiceError
 
 BATCH_STATUS = ("采集中", "已收齐", "已关闭")
@@ -29,6 +30,15 @@ def _refresh_batch_counts(conn, batch_id: int) -> None:
         "UPDATE visit_batches SET item_count=?, gap_count=? WHERE id=?",
         (item_count, gap_count, batch_id),
     )
+
+
+def _watermarks_for(conn, site_ids) -> dict[int, dict]:
+    states = {}
+    for sid in sorted({int(s) for s in site_ids}):
+        state = watermark_svc.read_state(conn, sid)
+        state["badge"] = watermark_svc.badge(state)
+        states[sid] = state
+    return states
 
 
 def list_batches(
@@ -60,7 +70,11 @@ def list_batches(
             """,
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+        states = _watermarks_for(conn, (i["site_id"] for i in items))
+    for item in items:
+        item["watermark"] = states[int(item["site_id"])]
+    return items
 
 
 def get_batch(batch_id: int, db_path: str | None = None) -> dict:
@@ -97,6 +111,9 @@ def get_batch(batch_id: int, db_path: str | None = None) -> dict:
         data = dict(row)
         data["items"] = [dict(i) for i in items]
         data["quality_stats"] = {r["quality"]: r["c"] for r in quality_stats}
+        state = watermark_svc.read_state(conn, int(row["site_id"]))
+        state["badge"] = watermark_svc.badge(state)
+        data["watermark"] = state
         return data
 
 
@@ -278,7 +295,8 @@ def mock_crawl(
 ) -> dict:
     count = max(1, min(30, int(count or 5)))
     created = []
-    with get_db(db_path) as conn:
+    # 一次落定：抓取开窗、写行、钉水位在同一写事务内串行完成。
+    with get_db(db_path, immediate=True) as conn:
         batch = conn.execute(
             "SELECT * FROM visit_batches WHERE id=?", (batch_id,)
         ).fetchone()
@@ -286,10 +304,11 @@ def mock_crawl(
             raise ServiceError("访视批次不存在", 404)
         if batch["status"] == "已关闭":
             raise ServiceError("已关闭批次不能模拟抓取")
+        window = watermark_svc.next_window(conn, int(batch["site_id"]), count)
         visit_codes = ["V1", "V2", "V3", "EOT"]
         if batch["protocol_id"]:
             proto = conn.execute(
-                "SELECT visit_codes FROM protocols WHERE id=?",
+                "SELECT required_fields, visit_codes FROM protocols WHERE id=?",
                 (batch["protocol_id"],),
             ).fetchone()
             if proto:
@@ -299,50 +318,97 @@ def mock_crawl(
                         visit_codes = [str(x) for x in parsed]
                 except json.JSONDecodeError:
                     pass
-        existing = conn.execute(
-            "SELECT COUNT(*) AS c FROM visit_rows WHERE batch_id=?", (batch_id,)
-        ).fetchone()["c"]
-    for i in range(count):
-        idx = existing + i + 1
-        subject = f"S{batch_id:02d}-{idx:04d}"
-        visit = visit_codes[i % len(visit_codes)]
-        if mix_bad and i % 5 == 1:
-            payload = json.dumps(
-                {"visit_date": "", "investigator": "李医生"}, ensure_ascii=False
+        site = conn.execute(
+            "SELECT quota FROM trial_sites WHERE id=?", (batch["site_id"],)
+        ).fetchone()
+        quota = int(site["quota"]) if site else 0
+        for i in range(count):
+            # 窗口水位即条目水位：只取窗止点之后的新条目，旧窗永不重抽。
+            idx = int(window["window_start"]) + i + 1
+            subject = f"S{int(batch['site_id']):02d}-{idx:04d}"
+            visit = visit_codes[i % len(visit_codes)]
+            if mix_bad and i % 5 == 1:
+                payload = json.dumps(
+                    {"visit_date": "", "investigator": "李医生"}, ensure_ascii=False
+                )
+                quality = "缺字段"
+            elif mix_bad and i % 5 == 3:
+                payload = ""
+                quality = "编码空"
+            else:
+                payload = json.dumps(
+                    {
+                        "visit_date": f"2026-11-{(i % 28) + 1:02d}",
+                        "investigator": "王医生" if i % 2 == 0 else "赵医生",
+                        "weight_kg": 50 + (i % 20),
+                        "note": f"模拟抓取行{idx}",
+                    },
+                    ensure_ascii=False,
+                )
+                quality = "合格"
+            row_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM visit_rows WHERE batch_id=?",
+                (batch_id,),
+            ).fetchone()["c"]
+            if quota > 0 and row_count >= quota:
+                raise ServiceError("已达中心配额上限，不能再抓取")
+            dup = conn.execute(
+                """
+                SELECT id FROM visit_rows
+                WHERE batch_id=? AND subject_key=? AND visit_code=?
+                """,
+                (batch_id, subject, visit),
+            ).fetchone()
+            if dup:
+                continue
+            q = quality
+            soft = conn.execute(
+                """
+                SELECT r.id FROM visit_rows r
+                JOIN visit_batches b ON b.id=r.batch_id
+                WHERE b.site_id=? AND b.id!=? AND b.status!='已关闭'
+                  AND r.subject_key=? AND r.visit_code=?
+                LIMIT 1
+                """,
+                (batch["site_id"], batch_id, subject, visit),
+            ).fetchone()
+            if soft and q == "合格":
+                q = "重复键"
+            cur = conn.execute(
+                """
+                INSERT INTO visit_rows(
+                  batch_id, subject_key, visit_code, payload, quality, status
+                ) VALUES (?, ?, ?, ?, ?, '待检')
+                """,
+                (batch_id, subject, visit, payload, q),
             )
-            quality = "缺字段"
-        elif mix_bad and i % 5 == 3:
-            payload = ""
-            quality = "编码空"
-        else:
-            payload = json.dumps(
-                {
-                    "visit_date": f"2026-11-{(i % 28) + 1:02d}",
-                    "investigator": "王医生" if i % 2 == 0 else "赵医生",
-                    "weight_kg": 50 + (i % 20),
-                    "note": f"模拟抓取行{idx}",
-                },
-                ensure_ascii=False,
+            created.append(
+                dict(
+                    conn.execute(
+                        "SELECT * FROM visit_rows WHERE id=?", (cur.lastrowid,)
+                    ).fetchone()
+                )
             )
-            quality = "合格"
-        created.append(
-            add_visit_row(
-                batch_id,
-                subject,
-                visit,
-                payload=payload,
-                quality=quality,
-                db_path=db_path,
+        landing = watermark_svc.record_landing(conn, window)
+        _refresh_batch_counts(conn, batch_id)
+        if batch["status"] == "已收齐":
+            conn.execute(
+                "UPDATE visit_batches SET status='采集中' WHERE id=?", (batch_id,)
             )
-        )
     audit_svc.write_event(
         "模拟抓取访视",
         "visit_batch",
         batch_id,
-        f"新增{len(created)}行",
+        f"窗{window['window_start']}→{window['window_end']}新增{len(created)}行，"
+        f"水位落点{landing['ledger_code']}",
         db_path=db_path,
     )
-    return {"created": len(created), "items": created, "batch": get_batch(batch_id, db_path)}
+    return {
+        "created": len(created),
+        "items": created,
+        "window": landing,
+        "batch": get_batch(batch_id, db_path),
+    }
 
 
 def close_batch(batch_id: int, db_path: str | None = None) -> dict:
@@ -466,6 +532,8 @@ def ingest_ok_rows(batch_id: int, db_path: str | None = None) -> dict:
             raise ServiceError("访视批次不存在", 404)
         if batch["status"] == "已关闭":
             raise ServiceError("已关闭批次不能入库")
+        # 入库同受水位闸门约束：徽标与窗止点拧花即拦。
+        watermark_svc.assert_can_advance(conn, int(batch["site_id"]))
         cur = conn.execute(
             """
             UPDATE visit_rows

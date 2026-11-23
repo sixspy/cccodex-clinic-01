@@ -17,6 +17,7 @@ from app.services import reconcile as reconcile_svc
 from app.services import settings as settings_svc
 from app.services import sites as sites_svc
 from app.services import visits as visits_svc
+from app.services import watermarks as watermark_svc
 from app.services.errors import ServiceError
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -441,6 +442,45 @@ class Api:
 
     @cherrypy.expose
     @_wrap
+    def watermarks(self, site_id=None, action=None):
+        _require()
+        method = cherrypy.request.method
+        if site_id is None:
+            if method != "GET":
+                return _json({"error": "方法不允许"}, 405)
+            return _json(
+                {
+                    "items": watermark_svc.list_landings(db_path=None),
+                    "states": list(watermark_svc.site_watermarks().values()),
+                    "summary": watermark_svc.landing_summary(),
+                }
+            )
+        try:
+            sid = int(site_id)
+        except (TypeError, ValueError):
+            return _json({"error": "试验中心编号无效"}, 400)
+        if action == "pin" and method == "POST":
+            body = _read_json()
+            try:
+                end = int(body.get("window_end") or 0)
+            except (TypeError, ValueError):
+                return _json({"error": "窗止点必须是整数"}, 400)
+            start = body.get("window_start")
+            try:
+                start_val = int(start) if start not in (None, "") else None
+            except (TypeError, ValueError):
+                return _json({"error": "窗起点必须是整数"}, 400)
+            if start_val is not None and start_val < 0:
+                return _json({"error": "窗起点不能为负"}, 400)
+            return _json(watermark_svc.pin_window(sid, end, start_val))
+        if action is None and method == "GET":
+            return _json(watermark_svc.site_watermark(site_id=sid))
+        if action == "landings" and method == "GET":
+            return _json({"items": watermark_svc.list_landings(site_id=sid)})
+        return _json({"error": "未知水位路由"}, 404)
+
+    @cherrypy.expose
+    @_wrap
     def audits(self):
         _require()
         q = _query()
@@ -521,6 +561,13 @@ class ApiMount:
             return api.settings(action=parts[1])
         if path == "/audits" or path.startswith("/audits"):
             return api.audits()
+        if path == "/watermarks" or path.startswith("/watermarks/"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 1:
+                return api.watermarks()
+            if len(parts) == 2:
+                return api.watermarks(site_id=parts[1])
+            return api.watermarks(site_id=parts[1], action=parts[2])
         return _json({"error": f"未知接口 {path}"}, 404)
 
 

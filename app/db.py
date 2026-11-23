@@ -103,6 +103,20 @@ CREATE TABLE IF NOT EXISTS app_settings (
   label TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS watermark_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ledger_code TEXT NOT NULL UNIQUE,
+  site_id INTEGER NOT NULL REFERENCES trial_sites(id),
+  window_start INTEGER NOT NULL,
+  window_end INTEGER NOT NULL,
+  window_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('已落定','已撤回')),
+  pinned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_watermark_site_end
+  ON watermark_ledger(site_id, window_end);
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -115,19 +129,25 @@ def ensure_db() -> Path:
     path = Config.DATABASE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         conn.commit()
     return path
 
 
 @contextmanager
-def get_db(db_path: str | Path | None = None):
+def get_db(db_path: str | Path | None = None, immediate: bool = False):
     path = Path(db_path) if db_path else Config.DATABASE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
+        if immediate:
+            # 写锁先行：并发钉同一中心水位时串行排队，避免水位钉点互盖。
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
     except Exception:

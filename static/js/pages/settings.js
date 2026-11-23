@@ -15,6 +15,7 @@ export async function renderSettings(el) {
         <div class="stat"><div class="n">${snapshot.site_quota_warn || '-'}</div><div class="l">配额告警阈值</div></div>
         <div class="stat"><div class="n">${escapeHtml((snapshot.clinic_timezone || '-').slice(0, 12))}</div><div class="l">时区</div></div>
       </div>
+      <div class="detail-box"><strong>水位钉点口径</strong>：${escapeHtml(snapshot.watermark_pin_caliber || '未设置')}</div>
     </div>
     <div class="card">
       <table>

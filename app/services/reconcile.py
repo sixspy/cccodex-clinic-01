@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.db import get_db
 from app.services import audit as audit_svc
+from app.services import watermarks as watermark_svc
 from app.services.errors import ServiceError
 
 
@@ -35,6 +36,7 @@ def dashboard(db_path: str | None = None) -> dict:
             SELECT status, COUNT(*) AS c FROM visit_batches GROUP BY status
             """
         ).fetchall()
+        landing = watermark_svc.landing_summary(conn=conn)
         return {
             "sites": sites,
             "sites_enabled": sites_enabled,
@@ -46,6 +48,9 @@ def dashboard(db_path: str | None = None) -> dict:
             "pending_jobs": jobs,
             "audits": audits,
             "batch_status": {r["status"]: r["c"] for r in by_batch_status},
+            "watermarks_landed": landing["landed"],
+            "watermarks_sites": landing["sites"],
+            "window_end_summary": landing["window_end_summary"],
         }
 
 
@@ -170,6 +175,7 @@ def get_report(report_id: int, db_path: str | None = None) -> dict:
 
 
 def site_gap_matrix(db_path: str | None = None) -> list[dict]:
+    states = watermark_svc.site_watermarks(db_path)
     with get_db(db_path) as conn:
         rows = conn.execute(
             """
@@ -186,4 +192,11 @@ def site_gap_matrix(db_path: str | None = None) -> list[dict]:
             ORDER BY s.id
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+    for item in items:
+        state = states[int(item["id"])]
+        item["watermark_status"] = state["status"]
+        item["window_end"] = state["window_end"]
+        item["ledger_code"] = state["ledger_code"]
+        item["watermark_badge"] = state["badge"]
+    return items

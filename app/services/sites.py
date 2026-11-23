@@ -2,12 +2,26 @@ from __future__ import annotations
 
 from app.db import get_db
 from app.services import audit as audit_svc
+from app.services import watermarks as watermark_svc
 from app.services.errors import ServiceError
 
 VALID_STATUS = ("启用", "停用", "观察")
 
 
+def _window_end_stop(state: dict) -> dict:
+    """窗止点摘要：与水位徽标同口径，供中心卡片展示。"""
+    return {
+        "status": state["status"],
+        "value": state["window_end"],
+        "window_start": state["window_start"],
+        "ledger_code": state["ledger_code"],
+        "pinned_at": state["pinned_at"],
+        "badge": state["badge"],
+    }
+
+
 def list_sites(db_path: str | None = None, status: str | None = None) -> list[dict]:
+    states = watermark_svc.site_watermarks(db_path)
     with get_db(db_path) as conn:
         if status:
             if status not in VALID_STATUS:
@@ -33,7 +47,13 @@ def list_sites(db_path: str | None = None, status: str | None = None) -> list[di
                 ORDER BY s.id
                 """
             ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+    for item in items:
+        state = states[int(item["id"])]
+        item["window_end_stop"] = _window_end_stop(state)
+        item["watermark_status"] = state["status"]
+        item["watermark_badge"] = state["badge"]
+    return items
 
 
 def get_site(site_id: int, db_path: str | None = None) -> dict:
@@ -62,6 +82,13 @@ def get_site(site_id: int, db_path: str | None = None) -> dict:
         data = dict(row)
         data["batches"] = [dict(b) for b in batches]
         data["open_gaps"] = open_gaps
+        state = watermark_svc.read_state(conn, site_id)
+        state["badge"] = watermark_svc.badge(state)
+        data["watermark"] = state
+        data["window_end_stop"] = _window_end_stop(state)
+        data["watermark_landings"] = watermark_svc.list_landings(
+            db_path, site_id=site_id, limit=20
+        )
         return data
 
 

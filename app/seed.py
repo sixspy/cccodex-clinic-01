@@ -3,11 +3,28 @@ from __future__ import annotations
 import json
 
 from app.db import _meta_get, _meta_set, ensure_db, get_db
+from app.services import watermarks as watermark_svc
+
+WATERMARK_PIN_CALIBER = (
+    "窗止点=最新水位落点window_end；访视侧只读账册，抓取只开窗止点之后的新窗"
+)
+
+
+def _ensure_watermark_setting(conn) -> None:
+    """已有库升级：补上水位钉点口径设置，不重灌种子。"""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO app_settings(key, value, label)
+        VALUES ('watermark_pin_caliber', ?, '水位钉点口径')
+        """,
+        (WATERMARK_PIN_CALIBER,),
+    )
 
 
 def seed_if_needed(db_path: str | None = None) -> None:
     ensure_db()
     with get_db(db_path) as conn:
+        _ensure_watermark_setting(conn)
         if _meta_get(conn, "seeded") == "1":
             return
 
@@ -20,6 +37,11 @@ def seed_if_needed(db_path: str | None = None) -> None:
             ("default_visit_codes", "V1,V2,V3,EOT", "默认访视编码清单"),
             ("crawl_page_size", "20", "模拟抓取每批条数"),
             ("clinic_timezone", "Asia/Shanghai", "台账时区"),
+            (
+                "watermark_pin_caliber",
+                WATERMARK_PIN_CALIBER,
+                "水位钉点口径",
+            ),
         ]
         conn.executemany(
             "INSERT OR IGNORE INTO app_settings(key, value, label) VALUES (?,?,?)",
@@ -206,6 +228,29 @@ def seed_if_needed(db_path: str | None = None) -> None:
             conn.execute(
                 "UPDATE visit_batches SET item_count=?, gap_count=? WHERE id=?",
                 (cnt, gap, bid),
+            )
+
+        # 水位账册种子：中心 1/2/3 各有落点，中心 4 故意留缺落点行。
+        landing_seed = [
+            (site_ids[0], 0, 103),
+            (site_ids[1], 0, 5),
+            (site_ids[2], 0, 2),
+        ]
+        for idx, (sid, wstart, wend) in enumerate(landing_seed, start=1):
+            conn.execute(
+                """
+                INSERT INTO watermark_ledger(
+                  ledger_code, site_id, window_start, window_end,
+                  window_fingerprint, status
+                ) VALUES (?, ?, ?, ?, ?, '已落定')
+                """,
+                (
+                    f"WM-SEED-{idx:02d}",
+                    sid,
+                    wstart,
+                    wend,
+                    watermark_svc.window_fingerprint(sid, wstart, wend),
+                ),
             )
 
         conn.execute(

@@ -27,7 +27,7 @@ export async function renderSites(el) {
         <input id="snote" placeholder="备注" />
         <button id="create">登记中心</button>
       </div>
-      <p class="muted">当前生效方案：${activeProto ? escapeHtml(activeProto.title + ' @ ' + activeProto.version) : '无'}</p>
+      <p class="muted">当前生效方案：${activeProto ? escapeHtml(activeProto.title + ' @ ' + activeProto.version) : '无'} · 窗止点取最新水位落点，徽标与窗止点拧花时禁止继续抓取入库。</p>
     </div>
     <div class="card">
       <div class="row">
@@ -43,7 +43,7 @@ export async function renderSites(el) {
         <thead>
           <tr>
             <th>编码</th><th>名称</th><th>状态</th><th>配额</th>
-            <th>批次</th><th>缺口合计</th><th>区域/负责人</th><th>操作</th>
+            <th>批次</th><th>缺口合计</th><th>区域/负责人</th><th>窗止点</th><th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -59,11 +59,16 @@ export async function renderSites(el) {
               <td>${s.batch_count}</td>
               <td>${s.gap_total}</td>
               <td>${escapeHtml(s.region || '-')} / ${escapeHtml(s.principal || '-')}</td>
+              <td>
+                <span class="chip ${s.watermark_status === '已落定' ? 'ok' : 'bad'}">水位徽标：${escapeHtml(s.watermark_status || '缺落点行')}</span>
+                <div class="muted">窗止点：${escapeHtml(String((s.window_end_stop || {}).value ?? '缺落点'))}${(s.window_end_stop || {}).ledger_code ? ' · 落点 ' + escapeHtml(s.window_end_stop.ledger_code) : ''}</div>
+              </td>
               <td class="row">
                 <button data-st="启用" data-id="${s.id}">启用</button>
                 <button data-st="观察" data-id="${s.id}" class="warn">观察</button>
                 <button data-st="停用" data-id="${s.id}" class="danger">停用</button>
                 <button data-q="${s.id}">配额+10</button>
+                <button data-pin="${s.id}" class="ghost">钉水位</button>
                 <button data-detail="${s.id}" class="ghost">详情</button>
               </td>
             </tr>`).join('')}
@@ -138,6 +143,10 @@ export async function renderSites(el) {
         <td>${s.batch_count}</td>
         <td>${s.gap_total}</td>
         <td>${escapeHtml(s.region || '-')} / ${escapeHtml(s.principal || '-')}</td>
+        <td>
+          <span class="chip ${s.watermark_status === '已落定' ? 'ok' : 'bad'}">水位徽标：${escapeHtml(s.watermark_status || '缺落点行')}</span>
+          <div class="muted">窗止点：${escapeHtml(String((s.window_end_stop || {}).value ?? '缺落点'))}</div>
+        </td>
         <td class="muted">请点刷新回到完整操作区</td>
       </tr>`).join('');
   };
@@ -174,6 +183,13 @@ export async function renderSites(el) {
         el.querySelector('#siteDetail').textContent = JSON.stringify({
           中心: detail.name,
           状态: detail.status,
+          水位徽标: detail.watermark?.badge,
+          窗止点: detail.window_end_stop?.value,
+          水位落点: (detail.watermark_landings || []).map((l) => ({
+            账册: l.ledger_code,
+            窗: `${l.window_start}→${l.window_end}`,
+            钉于: l.pinned_at,
+          })),
           开放缺口: detail.open_gaps,
           批次: (detail.batches || []).map((b) => ({
             编码: b.batch_code,
@@ -182,6 +198,22 @@ export async function renderSites(el) {
             缺口: b.gap_count,
           })),
         }, null, 2);
+      } catch (e) { errBox(e.message); }
+    };
+  });
+
+  el.querySelectorAll('[data-pin]').forEach((btn) => {
+    btn.onclick = async () => {
+      const raw = window.prompt('输入要钉住的窗止点（整数，须大于当前窗止点）', '');
+      if (raw === null) return;
+      try {
+        const r = await api(`/api/watermarks/${btn.dataset.pin}/pin`, {
+          method: 'POST',
+          body: JSON.stringify({ window_end: Number(raw) }),
+        });
+        await renderSites(el);
+        el.querySelector('#siteDetail').textContent =
+          `水位已落定：${r.badge || ''} · 账册 ${r.landing?.ledger_code || ''}`;
       } catch (e) { errBox(e.message); }
     };
   });
